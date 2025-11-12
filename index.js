@@ -6,6 +6,7 @@
  * Made by Валерий Зорькин 
  * discord -        treak_
  */
+
 import 'dotenv/config';
 import { nanoid } from "nanoid";
 import {
@@ -31,7 +32,6 @@ import {
 import db from "./database.js";
 
 /* ================== CONFIG ================== */
-// ВСЕ РАСПОЛОЖЕНЫ НА .ENV И НЕ ЗАГРУЖЕНО В РЕПАЗИТОРИЙ
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
@@ -209,8 +209,8 @@ const client = new Client({
 const rest = new REST({ version: "10" }).setToken(TOKEN);
 
 const commands = [
+  new SlashCommandBuilder().setName("help").setDescription("Показать справку по использованию бота"),
   new SlashCommandBuilder().setName("send").setDescription("Открыть форму регистрации законопроекта"),
-  new SlashCommandBuilder().setName("sendkol").setDescription("Открыть форму регистрации законопроекта с количественным голосованием"),
   new SlashCommandBuilder()
     .setName("create_meeting")
     .setDescription("Создать заседание (только для председателей)")
@@ -238,6 +238,28 @@ function parseDurationStr(s) {
   if (s === "3m") return 180_000;
   if (s === "5m") return 300_000;
   return 60_000;
+}
+
+// Новая функция для парсинга произвольного времени
+function parseCustomDuration(str) {
+  const timeUnits = {
+    'd': 24 * 60 * 60 * 1000,
+    'h': 60 * 60 * 1000, 
+    'm': 60 * 1000,
+    's': 1000
+  };
+
+  let totalMs = 0;
+  const regex = /(\d+)([dhms])/g;
+  let match;
+
+  while ((match = regex.exec(str)) !== null) {
+    const value = parseInt(match[1]);
+    const unit = match[2];
+    totalMs += value * timeUnits[unit];
+  }
+
+  return totalMs || 60000; // По умолчанию 1 минута
 }
 
 function formatTimeLeft(ms) {
@@ -676,15 +698,19 @@ async function startMeetingTicker(meetingId) {
           .setFooter({ text: FOOTER })
           .setTimestamp();
 
-        // Создаем кнопку для очистки ролей
-        const clearRolesButton = new ActionRowBuilder().addComponents(
+        // Создаем кнопки
+        const buttonsRow = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
             .setCustomId(`clear_roles_${meetingId}`)
             .setLabel("🧹 Очистить роли")
-            .setStyle(ButtonStyle.Danger)
+            .setStyle(ButtonStyle.Danger),
+          new ButtonBuilder()
+            .setCustomId(`late_registration_${meetingId}`)
+            .setLabel("⏰ Регистрация вне срока")
+            .setStyle(ButtonStyle.Secondary)
         );
           
-        await msg.edit({ content: null, embeds: [finalEmbed], components: [clearRolesButton] });
+        await msg.edit({ content: null, embeds: [finalEmbed], components: [buttonsRow] });
         
         // ВЫДАЕМ РОЛИ ДЛЯ ГОЛОСОВАНИЯ - ИСПРАВЛЕННАЯ ЧАСТЬ
         if (isQuorumMet) {
@@ -872,6 +898,7 @@ async function finalizeVote(proposalId) {
     await finalizeRegularVote(proposalId);
   }
 }
+
 /* ===== Finalize regular vote ===== */
 async function finalizeRegularVote(proposalId) {
   const proposal = db.getProposal(proposalId);
@@ -1472,7 +1499,67 @@ client.on(Events.InteractionCreate, async (interaction) => {
       
       const member = interaction.member;
       
-      if (cmd === "send" || cmd === "sendkol") {
+      if (cmd === "help") {
+        await interaction.deferReply({ flags: 64 });
+        
+        // Создаем embed с информацией для разных ролей
+        const helpEmbed = new EmbedBuilder()
+          .setTitle('📖 Справка по использованию бота')
+          .setColor(COLORS.PRIMARY)
+          .setFooter({ text: FOOTER })
+          .setTimestamp();
+        
+        let description = '';
+        
+        // Раздел для депутатов
+        if (member.roles.cache.has(ROLES.DEPUTY) || member.roles.cache.has(ROLES.DEPUTY_NO_VOTE)) {
+          description += `**👥 Для депутатов:**\n`;
+          description += `• Используйте команду \`/send\` для внесения законопроекта\n`;
+          description += `• Выберите палату и тип голосования\n`;
+          description += `• Заполните информацию о законопроекте\n`;
+          description += `• Регистрируйтесь для выступлений в обсуждениях\n`;
+          description += `• Участвуйте в голосованиях в соответствующих ветках\n`;
+          description += `• Следите за ходом рассмотрения в хронологии\n\n`;
+        }
+        
+        // Раздел для сенаторов
+        if (member.roles.cache.has(ROLES.SENATOR) || member.roles.cache.has(ROLES.SENATOR_NO_VOTE)) {
+          description += `**🏛️ Для членов Совета Федерации:**\n`;
+          description += `• Используйте команду \`/send\` для внесения законопроекта\n`;
+          description += `• Рассматривайте законопроекты, переданные из ГосДумы\n`;
+          description += `• Участвуйте в окончательном голосовании\n`;
+          description += `• Следите за подписанием Президентом\n\n`;
+        }
+        
+        // Раздел для председателей
+        if (isChamberChairman(member, 'sf') || isChamberChairman(member, 'gd_rublevka') || 
+            isChamberChairman(member, 'gd_arbat') || isChamberChairman(member, 'gd_patricki') || 
+            isChamberChairman(member, 'gd_tverskoy') || isAdmin(member)) {
+          description += `**🎯 Для председателей и администраторов:**\n`;
+          description += `• Используйте \`/create_meeting\` для создания заседаний\n`;
+          description += `• Начинайте регистрацию с установкой кворума\n`;
+          description += `• Запускайте голосования по законопроектам\n`;
+          description += `• Управляйте списком выступающих\n`;
+          description += `• Одобряйте/возвращайте законопроекты (Правительство)\n`;
+          description += `• Подписывайте/отклоняйте законопроекты (Президент)\n`;
+          description += `• Используйте \`/res_meeting\` для снятия ролей голосования\n\n`;
+        }
+        
+        // Общая информация
+        description += `**📋 Общие сведения:**\n`;
+        description += `• Каждая палата имеет свой канал для обсуждений\n`;
+        description += `• Голосования могут быть открытыми или тайными\n`;
+        description += `• Поддерживаются разные формулы подсчета голосов\n`;
+        description += `• Ведется полная хронология рассмотрения\n`;
+        description += `• Автоматическая выдача ролей для голосования\n`;
+        
+        helpEmbed.setDescription(description);
+        
+        await interaction.editReply({ embeds: [helpEmbed] });
+        return;
+      }
+
+      if (cmd === "send") {
         const availableChambers = getAvailableChambers(member);
         
         if (availableChambers.length === 0) {
@@ -1485,7 +1572,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         
         // Создаем выпадающий список с доступными палатами
         const selectMenu = new StringSelectMenuBuilder()
-          .setCustomId(`chamber_select_${cmd}`)
+          .setCustomId(`chamber_select_send`)
           .setPlaceholder('Выберите палату для внесения законопроекта')
           .addOptions(
             availableChambers.map(chamber => 
@@ -1505,7 +1592,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      if (cmd === "create_meeting") {
+            if (cmd === "create_meeting") {
         const member = interaction.member;
         
         // Определяем палату по каналу
@@ -1622,15 +1709,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     // Select menu interactions
     if (interaction.isStringSelectMenu()) {
-      if (interaction.customId.startsWith('chamber_select_')) {
+      if (interaction.customId === 'chamber_select_send') {
         const chamber = interaction.values[0];
-        const cmd = interaction.customId.split('chamber_select_')[1];
+        
+        // Создаем select menu для выбора типа голосования
+        const voteTypeSelect = new StringSelectMenuBuilder()
+          .setCustomId(`vote_type_select_${chamber}`)
+          .setPlaceholder('Выберите тип голосования')
+          .addOptions(
+            new StringSelectMenuOptionBuilder()
+              .setLabel('Обычное голосование')
+              .setDescription('За/Против/Воздержался')
+              .setValue('regular'),
+            new StringSelectMenuOptionBuilder()
+              .setLabel('Рейтинговое голосование')
+              .setDescription('Голосование по пунктам')
+              .setValue('quantitative')
+          );
+        
+        const row = new ActionRowBuilder().addComponents(voteTypeSelect);
+        
+        await interaction.update({
+          content: '🗳️ Выберите тип голосования для законопроекта:',
+          components: [row]
+        });
+        return;
+      }
+      
+      if (interaction.customId.startsWith('vote_type_select_')) {
+        const chamber = interaction.customId.split('vote_type_select_')[1];
+        const voteType = interaction.values[0];
         
         let modal;
         
-        if (cmd === 'send') {
+        if (voteType === 'regular') {
           modal = new ModalBuilder()
-            .setCustomId(`send_modal_${chamber}`)
+            .setCustomId(`send_modal_${chamber}_regular`)
             .setTitle(`Регистрация законопроекта`);
           
           const nameInput = new TextInputBuilder()
@@ -1656,10 +1770,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
             new ActionRowBuilder().addComponents(partyInput),
             new ActionRowBuilder().addComponents(linkInput)
           );
-        } else if (cmd === 'sendkol') {
+        } else if (voteType === 'quantitative') {
           modal = new ModalBuilder()
-            .setCustomId(`sendkol_modal_${chamber}`)
-            .setTitle(`Регистрация (кол. голос.)`);
+            .setCustomId(`send_modal_${chamber}_quantitative`)
+            .setTitle(`Регистрация (рейтинговое голос.)`);
           
           const nameInput = new TextInputBuilder()
             .setCustomId("proj_name")
@@ -1704,7 +1818,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId.startsWith("send_modal_")) {
         await interaction.deferReply({ flags: 64 });
         
-        const chamber = interaction.customId.split("send_modal_")[1];
+        const parts = interaction.customId.split("_");
+        const chamber = parts[2];
+        const voteType = parts[3];
+        
         const name = interaction.fields.getTextInputValue("proj_name");
         const party = interaction.fields.getTextInputValue("proj_party");
         const link = interaction.fields.getTextInputValue("proj_link");
@@ -1732,178 +1849,97 @@ client.on(Events.InteractionCreate, async (interaction) => {
           authorId: interaction.user.id,
           threadId: null,
           channelId: CHAMBER_CHANNELS[chamber],
-          isQuantitative: 0,
+          isQuantitative: voteType === 'quantitative' ? 1 : 0,
           events: initialEvents
         };
 
         try {
           db.createProposal(proposal);
 
-          const forum = await client.channels.fetch(CHAMBER_CHANNELS[chamber]);
-          const embed = new EmbedBuilder()
-            .setTitle(`📋 ЗАКОНОПРОЕКТ ${number}`)
-            .setDescription(`Зарегистрирован новый законопроект`)
-            .addFields(
-              { name: "🏛️ Палата", value: CHAMBER_NAMES[chamber], inline: false },
-              { name: "📝 Наименование", value: name, inline: false },
-              { name: "🏛️ Партия / Организация", value: party, inline: false },
-              { name: "🔗 Ссылка на документ", value: `[Кликабельно](${link})`, inline: false },
-              { name: "👤 Автор инициативы", value: `<@${interaction.user.id}>`, inline: false },
-              { name: "📅 Дата регистрации", value: formatMoscowTime(Date.now()), inline: false }
-            )
-            .setColor(COLORS.PRIMARY)
-            .setFooter({ text: FOOTER })
-            .setTimestamp();
+          // Обрабатываем пункты для количественного голосования
+          if (voteType === 'quantitative') {
+            const itemsText = interaction.fields.getTextInputValue("items");
+            const items = itemsText 
+              ? itemsText.split(';')
+                  .map(item => item.trim())
+                  .filter(item => item !== '')
+                  .slice(0, 5) // Ограничиваем максимум 5 пунктами
+              : [];
 
-          const threadMessage = await forum.threads.create({
-            name: `${number} — ${name}`,
-            appliedTags: [FORUM_TAGS.ON_REVIEW],
-            message: {
-              embeds: [embed],
-              components: [
-                new ActionRowBuilder().addComponents(
-                  new ButtonBuilder().setCustomId(`start_vote_${id}`).setLabel("▶️ Начать голосование").setStyle(ButtonStyle.Success),
-                  new ButtonBuilder().setCustomId(`register_speaker_${id}`).setLabel("🎤 Зарегистрироваться выступить").setStyle(ButtonStyle.Primary),
-                  new ButtonBuilder().setCustomId(`delete_proposal_${id}`).setLabel("🗑️ Удалить/Отозвать").setStyle(ButtonStyle.Danger)
-                ),
-              ],
-            },
-          });
-
-          // Получаем ID первого сообщения в ветке
-          const firstMessage = await threadMessage.fetchStarterMessage();
-          db.updateProposalInitialMessage(id, firstMessage.id);
-          db.updateProposalThread(id, threadMessage.id);
-          
-          // **FIX (Point 4):** Создаем сообщения в правильном порядке
-          await updateHistoryMessage(id);
-          await updateSpeakersMessage(id);
-          
-          await interaction.editReply({ content: `✅ Законопроект зарегистрирован: ${threadMessage.url}` });
-        } catch (e) {
-          console.error("Error creating forum thread:", e);
-          await interaction.editReply({ content: "❌ Ошибка при создании темы в форуме — проверь права бота и ID форума." });
-        }
-        return;
-      }
-
-      if (interaction.customId.startsWith("sendkol_modal_")) {
-        await interaction.deferReply({ flags: 64 });
-        
-        const chamber = interaction.customId.split("sendkol_modal_")[1];
-        const name = interaction.fields.getTextInputValue("proj_name");
-        const party = interaction.fields.getTextInputValue("proj_party");
-        const link = interaction.fields.getTextInputValue("proj_link");
-        const itemsText = interaction.fields.getTextInputValue("items");
-
-        const number = db.getNextProposalNumber(chamber);
-        const id = nanoid(8);
-        
-        // Создаем начальные события
-        const initialEvents = [{
-          type: 'registration',
-          chamber: chamber,
-          timestamp: Date.now(),
-          description: `Внесение в ${CHAMBER_NAMES[chamber]} (Автор: <@${interaction.user.id}>)`
-        }];
-        
-        const proposal = {
-          id,
-          number,
-          name,
-          party,
-          link,
-          chamber,
-          status: "На рассмотрении",
-          createdAt: Date.now(),
-          authorId: interaction.user.id,
-          threadId: null,
-          channelId: CHAMBER_CHANNELS[chamber],
-          isQuantitative: 1,
-          events: initialEvents
-        };
-
-        try {
-          db.createProposal(proposal);
-
-          // Обрабатываем пункты из текстового поля
-          const items = itemsText 
-            ? itemsText.split(';')
-                .map(item => item.trim())
-                .filter(item => item !== '')
-                .slice(0, 5) // Ограничиваем максимум 5 пунктами
-            : [];
-
-          // Сохраняем пункты количественного голосования
-          items.forEach((itemText, index) => {
-            db.addQuantitativeItem({
-              proposalId: id,
-              itemIndex: index + 1,
-              text: itemText
-            });
-          });
-
-          const forum = await client.channels.fetch(CHAMBER_CHANNELS[chamber]);
-          const embed = new EmbedBuilder()
-            .setTitle(`📋 ЗАКОНОПРОЕКТ ${number} (Количественное голосование)`)
-            .setDescription(`Зарегистрирован новый законопроект с количественным голосованием`)
-            .addFields(
-              { name: "🏛️ Палата", value: CHAMBER_NAMES[chamber], inline: false },
-              { name: "📝 Наименование", value: name, inline: false },
-              { name: "🏛️ Партия / Организация", value: party, inline: false },
-              { name: "🔗 Ссылка на документ", value: `[Кликабельно](${link})`, inline: false },
-              { name: "👤 Автор инициативы", value: `<@${interaction.user.id}>`, inline: false },
-              { name: "📅 Дата регистрации", value: formatMoscowTime(Date.now()), inline: false }
-            )
-            .setColor(COLORS.PRIMARY)
-            .setFooter({ text: FOOTER })
-            .setTimestamp();
-
-          const threadMessage = await forum.threads.create({
-            name: `${number} — ${name}`,
-            appliedTags: [FORUM_TAGS.ON_REVIEW],
-            message: {
-              embeds: [embed],
-              components: [
-                new ActionRowBuilder().addComponents(
-                  new ButtonBuilder().setCustomId(`start_vote_${id}`).setLabel("▶️ Начать голосование").setStyle(ButtonStyle.Success),
-                  new ButtonBuilder().setCustomId(`register_speaker_${id}`).setLabel("🎤 Зарегистрироваться выступить").setStyle(ButtonStyle.Primary),
-                  new ButtonBuilder().setCustomId(`delete_proposal_${id}`).setLabel("🗑️ Удалить/Отозвать").setStyle(ButtonStyle.Danger)
-                ),
-              ],
-            },
-          });
-
-          // Получаем ID первого сообщения в ветке
-          const firstMessage = await threadMessage.fetchStarterMessage();
-          db.updateProposalInitialMessage(id, firstMessage.id);
-          db.updateProposalThread(id, threadMessage.id);
-          
-          // **FIX (Point 4):** Создаем сообщения в правильном порядке
-          await updateHistoryMessage(id);
-          await updateSpeakersMessage(id);
-          
-          // Создаем сообщение с пунктами количественного голосования
-          if (items.length > 0) {
-            const itemsEmbed = new EmbedBuilder()
-              .setTitle(`📊 Пункты для количественного голосования`)
-              .setDescription(`Данный законопроект подразумевает количественное голосование по следующим пунктам:`)
-              .setColor(COLORS.INFO)
-              .setFooter({ text: FOOTER })
-              .setTimestamp();
-            
-            items.forEach((item, index) => {
-              itemsEmbed.addFields({
-                name: `Пункт ${index + 1}`,
-                value: item,
-                inline: false
+            // Сохраняем пункты количественного голосования
+            items.forEach((itemText, index) => {
+              db.addQuantitativeItem({
+                proposalId: id,
+                itemIndex: index + 1,
+                text: itemText
               });
             });
-            
-            await threadMessage.send({ embeds: [itemsEmbed] });
+          }
+
+          const forum = await client.channels.fetch(CHAMBER_CHANNELS[chamber]);
+          const embed = new EmbedBuilder()
+            .setTitle(`📋 ЗАКОНОПРОЕКТ ${number}${voteType === 'quantitative' ? ' (Рейтинговое голосование)' : ''}`)
+            .setDescription(`Зарегистрирован новый законопроект${voteType === 'quantitative' ? ' с рейтинговым голосованием' : ''}`)
+            .addFields(
+              { name: "🏛️ Палата", value: CHAMBER_NAMES[chamber], inline: false },
+              { name: "📝 Наименование", value: name, inline: false },
+              { name: "🏛️ Партия / Организация", value: party, inline: false },
+              { name: "🔗 Ссылка на документ", value: `[Кликабельно](${link})`, inline: false },
+              { name: "👤 Автор инициативы", value: `<@${interaction.user.id}>`, inline: false },
+              { name: "📅 Дата регистрации", value: formatMoscowTime(Date.now()), inline: false }
+            )
+            .setColor(COLORS.PRIMARY)
+            .setFooter({ text: FOOTER })
+            .setTimestamp();
+
+          const threadMessage = await forum.threads.create({
+            name: `${number} — ${name}`,
+            appliedTags: [FORUM_TAGS.ON_REVIEW],
+            message: {
+              embeds: [embed],
+              components: [
+                new ActionRowBuilder().addComponents(
+                  new ButtonBuilder().setCustomId(`start_vote_${id}`).setLabel("▶️ Начать голосование").setStyle(ButtonStyle.Success),
+                  new ButtonBuilder().setCustomId(`register_speaker_${id}`).setLabel("🎤 Зарегистрироваться выступить").setStyle(ButtonStyle.Primary),
+                  new ButtonBuilder().setCustomId(`delete_proposal_${id}`).setLabel("🗑️ Удалить/Отозвать").setStyle(ButtonStyle.Danger)
+                ),
+              ],
+            },
+          });
+
+          // Получаем ID первого сообщения в ветке
+          const firstMessage = await threadMessage.fetchStarterMessage();
+          db.updateProposalInitialMessage(id, firstMessage.id);
+          db.updateProposalThread(id, threadMessage.id);
+          
+          // Создаем сообщения в правильном порядке
+          await updateHistoryMessage(id);
+          await updateSpeakersMessage(id);
+          
+          // Для количественного голосования создаем сообщение с пунктами
+          if (voteType === 'quantitative') {
+            const items = db.getQuantitativeItems(id);
+            if (items.length > 0) {
+              const itemsEmbed = new EmbedBuilder()
+                .setTitle(`📊 Пункты для рейтингового голосования`)
+                .setDescription(`Данный законопроект подразумевает рейтинговое голосование по следующим пунктам:`)
+                .setColor(COLORS.INFO)
+                .setFooter({ text: FOOTER })
+                .setTimestamp();
+              
+              items.forEach((item, index) => {
+                itemsEmbed.addFields({
+                  name: `Пункт ${index + 1}`,
+                  value: item.text,
+                  inline: false
+                });
+              });
+              
+              await threadMessage.send({ embeds: [itemsEmbed] });
+            }
           }
           
-          await interaction.editReply({ content: `✅ Законопроект с количественным голосованием зарегистрирован: ${threadMessage.url}` });
+          await interaction.editReply({ content: `✅ Законопроект зарегистрирован: ${threadMessage.url}` });
         } catch (e) {
           console.error("Error creating forum thread:", e);
           await interaction.editReply({ content: "❌ Ошибка при создании темы в форуме — проверь права бота и ID форума." });
@@ -1920,9 +1956,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
         const voteTypeInput = interaction.fields.getTextInputValue("vote_type").trim();
         const formulaInput = interaction.fields.getTextInputValue("vote_formula").trim();
         
-        const allowed = ["0s", "30s", "1m", "2m", "3m", "5m"];
-        const chosen = allowed.includes(durInput) ? durInput : "1m";
-        const ms = parseDurationStr(chosen);
+        // Используем новую функцию для парсинга времени
+        const ms = parseCustomDuration(durInput);
         
         const isSecret = voteTypeInput === "0";
         const formula = ["0", "1", "2", "3"].includes(formulaInput) ? formulaInput : "0";
@@ -2016,7 +2051,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           }
 
           const embed = new EmbedBuilder()
-            .setTitle(`🗳️ Голосование по инициативе ${proposal.number}${proposal.isQuantitative ? ' (Количественное)' : ''}`)
+            .setTitle(`🗳️ Голосование по инициативе ${proposal.number}${proposal.isQuantitative ? ' (Рейтинговое)' : ''}`)
             .setDescription(`Голосование началось!\n\n${timeText}`)
             .addFields(
               { name: "🔒 Тип голосования", value: isSecret ? "Тайное" : "Открытое", inline: true },
@@ -2040,7 +2075,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             await startVoteTicker(pid);
           }
 
-          const durationText = ms > 0 ? chosen : "до ручного завершения";
+          const durationText = ms > 0 ? durInput : "до ручного завершения";
           await interaction.editReply({ 
             content: `✅ Голосование запущено на ${durationText}. Тип: ${isSecret ? "тайное" : "открытое"}, формула: ${getFormulaDescription(formula)}.` 
           });
@@ -2051,7 +2086,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // Modal for speaker registration
+            // Modal for speaker registration
       if (interaction.customId.startsWith("speaker_modal_")) {
         const pid = interaction.customId.split("speaker_modal_")[1];
         const typeInput = interaction.fields.getTextInputValue("speaker_type");
@@ -2375,7 +2410,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           
           await interaction.editReply({ content: `✅ Роли очищены у ${count} участников.` });
           
-          // **FIX (Point 1):** Убираем кнопку после нажатия
+          // Убираем кнопку после нажатия
           await interaction.message.edit({ components: [] });
           
         } catch (e) {
@@ -2385,7 +2420,236 @@ client.on(Events.InteractionCreate, async (interaction) => {
         return;
       }
 
-      // Start registration button for meeting
+      // Late registration button
+      if (cid.startsWith("late_registration_")) {
+        const meetingId = cid.split("late_registration_")[1];
+        const meeting = db.getMeeting(meetingId);
+        
+        if (!meeting) {
+          await interaction.reply({ content: "❌ Заседание не найдено.", flags: 64 });
+          return;
+        }
+
+        // Проверяем, что регистрация уже завершена
+        if (meeting.open) {
+          await interaction.reply({ content: "❌ Регистрация еще не завершена. Дождитесь окончания.", flags: 64 });
+          return;
+        }
+
+        await interaction.deferReply({ flags: 64 });
+
+        try {
+          const ch = await client.channels.fetch(meeting.channelId);
+          
+          // Создаем ветку для обсуждения поздней регистрации
+          const thread = await ch.threads.create({
+            name: `📝 Поздняя регистрация - ${interaction.user.displayName}`,
+            autoArchiveDuration: 60,
+            reason: `Поздняя регистрация на заседание: ${meeting.title}`
+          });
+
+          // Получаем создателя заседания
+          const meetingCreator = await ch.messages.fetch(meeting.messageId).then(msg => msg.author);
+
+          const embed = new EmbedBuilder()
+            .setTitle(`⏰ Запрос на позднюю регистрацию`)
+            .setDescription(`Пользователь <@${interaction.user.id}> хочет зарегистрироваться на заседание "${meeting.title}" после окончания срока регистрации.`)
+            .addFields(
+              { name: "👤 Пользователь", value: `<@${interaction.user.id}>`, inline: true },
+              { name: "📅 Заседание", value: meeting.title, inline: true },
+              { name: "🕐 Время запроса", value: formatMoscowTime(Date.now()), inline: true }
+            )
+            .setColor(COLORS.WARNING)
+            .setFooter({ text: FOOTER })
+            .setTimestamp();
+
+          const buttons = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`approve_late_${meetingId}_${interaction.user.id}`)
+              .setLabel("✅ Зарегистрировать")
+              .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+              .setCustomId(`reject_late_${meetingId}_${interaction.user.id}`)
+              .setLabel("❌ Отказать")
+              .setStyle(ButtonStyle.Danger)
+          );
+
+          await thread.send({ 
+            content: `<@${meetingCreator.id}>`, 
+            embeds: [embed], 
+            components: [buttons] 
+          });
+
+          await interaction.editReply({ 
+            content: `✅ Запрос на позднюю регистрацию отправлен. Обсуждение создано в ветке: ${thread}` 
+          });
+
+        } catch (e) {
+          console.error("Error creating late registration thread:", e);
+          await interaction.editReply({ content: "❌ Ошибка при создании запроса на позднюю регистрацию." });
+        }
+        return;
+      }
+
+      // Approve late registration
+      if (cid.startsWith("approve_late_")) {
+        const parts = cid.split("_");
+        const meetingId = parts[2];
+        const userId = parts[3];
+        
+        const meeting = db.getMeeting(meetingId);
+        if (!meeting) {
+          await interaction.reply({ content: "❌ Заседание не найдено.", flags: 64 });
+          return;
+        }
+
+        const member = interaction.member;
+        if (!isChamberChairman(member, meeting.chamber) && !isAdmin(member)) {
+          await interaction.reply({ content: "❌ У вас нет прав для одобрения поздней регистрации.", flags: 64 });
+          return;
+        }
+
+        await interaction.deferReply({ flags: 64 });
+
+        try {
+          // Регистрируем пользователя
+          if (!db.isUserRegistered(meetingId, userId)) {
+            db.registerForMeeting(meetingId, userId);
+          }
+
+          // Выдаем роль для голосования
+          const voterRoleId = VOTER_ROLES_BY_CHAMBER[meeting.chamber];
+          const guildMember = await interaction.guild.members.fetch(userId);
+          await guildMember.roles.add(voterRoleId, `Поздняя регистрация для заседания ${meeting.title}`);
+
+          // Обновляем сообщение со списком зарегистрированных
+          const ch = await client.channels.fetch(meeting.channelId);
+          const meetingMsg = await ch.messages.fetch(meeting.messageId);
+          
+          const registered = db.getMeetingRegistrations(meetingId);
+          const registeredCount = registered.length;
+          const quorum = meeting.quorum || 1;
+          
+          const listText = registeredCount ? registered.map(r => `<@${r.userId}> (${formatMoscowTime(db.getRegistrationTime(meetingId, r.userId))})`).join("\n") : "Никто не зарегистрирован";
+
+          const embed = new EmbedBuilder()
+            .setTitle(`📋 Регистрация завершена`)
+            .setDescription(`**${meeting.title}**`)
+            .addFields(
+              { name: "👥 Количество зарегистрированных", value: String(registeredCount), inline: true },
+              { name: "📊 Требуемый кворум", value: String(quorum), inline: true },
+              { name: "📈 Статус кворума", value: registeredCount >= quorum ? "✅ Собран" : "❌ Не собран", inline: true },
+              { name: "👥 Общее количество членов", value: String(meeting.totalMembers), inline: true },
+              { name: "⏱️ Время регистрации", value: formatTimeLeft(meeting.durationMs), inline: true },
+              { name: "🕐 Начало регистрации", value: formatMoscowTime(meeting.createdAt), inline: false },
+              { name: "📝 Список зарегистрированных", value: listText, inline: false }
+            )
+            .setColor(registeredCount >= quorum ? COLORS.SUCCESS : COLORS.DANGER)
+            .setFooter({ text: FOOTER })
+            .setTimestamp();
+
+          await meetingMsg.edit({ embeds: [embed] });
+
+          // Убираем кнопки после решения
+          await interaction.message.edit({ components: [] });
+
+          await interaction.editReply({ 
+            content: `✅ Пользователь <@${userId}> успешно зарегистрирован и получил роль для голосования.` 
+          });
+
+          // Отправляем уведомление в ветку
+          await interaction.followUp({ 
+            content: `✅ <@${userId}> был зарегистрирован на заседание "${meeting.title}" с выдачей роли для голосования.` 
+          });
+
+        } catch (e) {
+          console.error("Error approving late registration:", e);
+          await interaction.editReply({ content: "❌ Ошибка при одобрении поздней регистрации." });
+        }
+        return;
+      }
+
+      // Reject late registration
+      if (cid.startsWith("reject_late_")) {
+        const parts = cid.split("_");
+        const meetingId = parts[2];
+        const userId = parts[3];
+        
+        const meeting = db.getMeeting(meetingId);
+        if (!meeting) {
+          await interaction.reply({ content: "❌ Заседание не найдено.", flags: 64 });
+          return;
+        }
+
+        const member = interaction.member;
+        if (!isChamberChairman(member, meeting.chamber) && !isAdmin(member)) {
+          await interaction.reply({ content: "❌ У вас нет прав для отклонения поздней регистрации.", flags: 64 });
+          return;
+        }
+
+        // Показываем модальное окно для указания причины отказа
+        const modal = new ModalBuilder()
+          .setCustomId(`reject_late_modal_${meetingId}_${userId}`)
+          .setTitle("Причина отказа в регистрации");
+          
+        const reasonInput = new TextInputBuilder()
+          .setCustomId("reject_reason")
+          .setLabel("Укажите причину отказа")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(true)
+          .setPlaceholder("Опишите причину, по которой регистрация была отклонена...");
+          
+        modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
+        await interaction.showModal(modal);
+        return;
+      }
+
+      // Modal for rejecting late registration
+      if (interaction.customId.startsWith("reject_late_modal_")) {
+        await interaction.deferReply({ flags: 64 });
+        
+        const parts = interaction.customId.split("_");
+        const meetingId = parts[3];
+        const userId = parts[4];
+        const reason = interaction.fields.getTextInputValue("reject_reason");
+        
+        const meeting = db.getMeeting(meetingId);
+        if (!meeting) {
+          await interaction.editReply({ content: "❌ Заседание не найдено." });
+          return;
+        }
+
+        try {
+          // Убираем кнопки после решения
+          await interaction.message.edit({ components: [] });
+
+          await interaction.editReply({ 
+            content: `❌ Регистрация пользователя <@${userId}> отклонена.` 
+          });
+
+          // Отправляем уведомление в ветку с причиной
+          const rejectEmbed = new EmbedBuilder()
+            .setTitle(`❌ Регистрация отклонена`)
+            .setDescription(`Поздняя регистрация пользователя <@${userId}> на заседание "${meeting.title}" была отклонена.`)
+            .addFields(
+              { name: "👤 Отклонил", value: `<@${interaction.user.id}>`, inline: true },
+              { name: "📅 Время", value: formatMoscowTime(Date.now()), inline: true },
+              { name: "📋 Причина отказа", value: reason, inline: false }
+            )
+            .setColor(COLORS.DANGER)
+            .setFooter({ text: FOOTER })
+            .setTimestamp();
+
+          await interaction.followUp({ embeds: [rejectEmbed] });
+
+        } catch (e) {
+          console.error("Error rejecting late registration:", e);
+          await interaction.editReply({ content: "❌ Ошибка при отклонении поздней регистрации." });
+        }
+        return;
+      }
+
+            // Start registration button for meeting
       if (cid.startsWith("start_registration_")) {
         const meetingId = cid.split("start_registration_")[1];
         const meeting = db.getMeeting(meetingId);
@@ -2534,14 +2798,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
           
         const durInput = new TextInputBuilder()
           .setCustomId("vote_duration")
-          .setLabel("Время голосования")
+          .setLabel("Время голосования (1d, 1h, 1m, 30s)")
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
-          .setPlaceholder("0s, 30s, 1m, 2m, 3m, 5m");
+          .setPlaceholder("Пример: 1h30m или 5m");
           
         const voteTypeInput = new TextInputBuilder()
           .setCustomId("vote_type")
-          .setLabel("Тип голосования")
+          .setLabel("Тип голосования (0-тайное, 1-открытое)")
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setPlaceholder("0 - тайное, 1 - открытое")
@@ -2549,7 +2813,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           
         const formulaInput = new TextInputBuilder()
           .setCustomId("vote_formula")
-          .setLabel("Формула")
+          .setLabel("Формула (0-больш, 1-2/3, 2-3/4, 3-от общего)")
           .setStyle(TextInputStyle.Short)
           .setRequired(true)
           .setPlaceholder("0-больш, 1-2/3, 2-3/4, 3-от общего")
@@ -2698,7 +2962,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           db.updateProposalEvents(pid, events);
           db.updateProposalStatus(pid, 'Одобрен Правительством');
           
-          // **FIX (Point 4):** Обновляем хронологию в оригинальном треде
+          // Обновляем хронологию в оригинальном треде
           await updateHistoryMessage(pid);
           
           // Создаем новый законопроект в Совете Федерации
@@ -2765,7 +3029,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             db.updateProposalInitialMessage(newId, firstMessage.id);
             db.updateProposalThread(newId, threadMessage.id);
             
-            // **FIX (Point 4):** Создаем сообщения в правильном порядке
+            // Создаем сообщения в правильном порядке
             await updateHistoryMessage(newId);
             await updateSpeakersMessage(newId);
             
@@ -2801,7 +3065,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           db.updateProposalEvents(pid, events);
           db.updateProposalStatus(pid, 'Возвращен Правительством');
           
-          // **FIX (Point 4):** Обновляем хронологию
+          // Обновляем хронологию
           await updateHistoryMessage(pid);
           
           // Обновляем тред
@@ -2859,7 +3123,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           db.updateProposalEvents(pid, events);
           db.updateProposalStatus(pid, 'Подписан');
           
-          // **FIX (Point 4):** Обновляем хронологию
+          // Обновляем хронологию
           await updateHistoryMessage(pid);
           
           // Обновляем тред
@@ -2890,7 +3154,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           db.updateProposalEvents(pid, events);
           db.updateProposalStatus(pid, 'Отклонен Президентом');
           
-          // **FIX (Point 4):** Обновляем хронологию
+          // Обновляем хронологию
           await updateHistoryMessage(pid);
           
           // Обновляем тред
@@ -2913,8 +3177,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         }
         return;
       }
-
-      // Vote buttons for regular voting
+            // Vote buttons for regular voting
       if (cid.startsWith("vote_for_") || cid.startsWith("vote_against_") || cid.startsWith("vote_abstain_")) {
         const parts = cid.split("_");
         const kind = parts[1];
@@ -3126,6 +3389,12 @@ function hasChamberAccess(member, chamber) {
   
   return requiredRoles.some(roleId => member.roles.cache.has(roleId));
 }
+
+// Добавляем метод для получения времени регистрации пользователя
+db.getRegistrationTime = function(meetingId, userId) {
+  const result = this.db.prepare('SELECT registeredAt FROM meeting_registrations WHERE meetingId = ? AND userId = ?').get(meetingId, userId);
+  return result ? result.registeredAt : null;
+};
 
 /* ===== Error handling ===== */
 process.on('unhandledRejection', (error) => {
