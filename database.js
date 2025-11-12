@@ -1,5 +1,5 @@
-// database.js 
-// ПОКА ТАК, ПОЗЖЕ БУДЕТ ПЕРЕНЕСЕНО НА MYSQL ИЛИ POSTGRESQL
+// database.js (исправленная версия)
+
 import Database from 'better-sqlite3';
 import path from 'path';
 
@@ -482,6 +482,12 @@ class CongressDatabase {
   getRegistrationCount(meetingId) {
     const result = this.db.prepare('SELECT COUNT(*) as count FROM meeting_registrations WHERE meetingId = ?').get(meetingId);
     return result.count;
+  }
+
+  // Новый метод для получения времени регистрации
+  getRegistrationTime(meetingId, userId) {
+    const result = this.db.prepare('SELECT registeredAt FROM meeting_registrations WHERE meetingId = ? AND userId = ?').get(meetingId, userId);
+    return result ? result.registeredAt : null;
   }
 
   // Методы для работы с выступающими
