@@ -1,22 +1,51 @@
-// database.js (исправленная версия)
-
-import Database from 'better-sqlite3';
-import path from 'path';
-
-const DB_PATH = path.join(process.cwd(), 'congress.db');
+// database.js (PostgreSQL версия - ИСПРАВЛЕННАЯ)
+import pkg from 'pg';
+const { Pool } = pkg;
 
 class CongressDatabase {
   constructor() {
-    this.db = new Database(DB_PATH);
-    this.init();
+    this.pool = new Pool({
+      user: process.env.DB_USER || 'bot_user',
+      host: process.env.DB_HOST || 'localhost',
+      database: process.env.DB_NAME || 'congress_bot',
+      password: process.env.DB_PASSWORD,
+      port: process.env.DB_PORT || 5432,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 2000,
+    });
+    
+    this.init().catch(console.error);
   }
 
-  init() {
-    // Включаем поддержку внешних ключей
-    this.db.pragma('foreign_keys = ON');
+  async init() {
+    try {
+      await this.createTables();
+      console.log('✅ Database initialized successfully');
+    } catch (error) {
+      console.error('❌ Database initialization failed:', error);
+      throw error;
+    }
+  }
 
+  async query(text, params) {
+    const start = Date.now();
+    try {
+      const res = await this.pool.query(text, params);
+      const duration = Date.now() - start;
+      if (duration > 1000) {
+        console.log(`🐌 Slow query (${duration}ms):`, text);
+      }
+      return res;
+    } catch (error) {
+      console.error('❌ Query error:', error, text, params);
+      throw error;
+    }
+  }
+
+  async createTables() {
     // Таблица для счетчиков предложений по палатам
-    this.db.exec(`
+    await this.query(`
       CREATE TABLE IF NOT EXISTS chamber_counters (
         chamberId TEXT PRIMARY KEY,
         value INTEGER NOT NULL DEFAULT 1
@@ -24,7 +53,7 @@ class CongressDatabase {
     `);
 
     // Таблица для предложений
-    this.db.exec(`
+    await this.query(`
       CREATE TABLE IF NOT EXISTS proposals (
         id TEXT PRIMARY KEY,
         number TEXT NOT NULL,
@@ -33,64 +62,65 @@ class CongressDatabase {
         link TEXT NOT NULL,
         chamber TEXT NOT NULL,
         status TEXT NOT NULL DEFAULT 'На рассмотрении',
-        createdAt INTEGER NOT NULL,
+        createdAt BIGINT NOT NULL,
         authorId TEXT NOT NULL,
         threadId TEXT,
         channelId TEXT,
         speakersMessageId TEXT,
         historyMessageId TEXT,
         initialMessageId TEXT,
-        isQuantitative INTEGER DEFAULT 0,
+        isQuantitative BOOLEAN DEFAULT FALSE,
         parentProposalId TEXT,
-        events TEXT DEFAULT '[]'
+        events JSONB DEFAULT '[]'::JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
     // Таблица для пунктов количественного голосования
-    this.db.exec(`
+    await this.query(`
       CREATE TABLE IF NOT EXISTS quantitative_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        proposalId TEXT NOT NULL,
+        id SERIAL PRIMARY KEY,
+        proposalId TEXT NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
         itemIndex INTEGER NOT NULL,
         text TEXT NOT NULL,
-        FOREIGN KEY (proposalId) REFERENCES proposals (id) ON DELETE CASCADE
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
     // Таблица для информации о голосованиях
-    this.db.exec(`
+    await this.query(`
       CREATE TABLE IF NOT EXISTS votings (
-        proposalId TEXT PRIMARY KEY,
-        open INTEGER NOT NULL DEFAULT 0,
-        startedAt INTEGER,
-        endedAt INTEGER,
-        durationMs INTEGER,
-        expiresAt INTEGER,
+        proposalId TEXT PRIMARY KEY REFERENCES proposals(id) ON DELETE CASCADE,
+        open BOOLEAN NOT NULL DEFAULT FALSE,
+        startedAt BIGINT,
+        endedAt BIGINT,
+        durationMs BIGINT,
+        expiresAt BIGINT,
         messageId TEXT,
-        isSecret INTEGER DEFAULT 0,
+        isSecret BOOLEAN DEFAULT FALSE,
         formula TEXT DEFAULT '0',
         stage INTEGER DEFAULT 1,
         runoffMessageId TEXT,
-        FOREIGN KEY (proposalId) REFERENCES proposals (id) ON DELETE CASCADE
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
     // Таблица для голосов
-    this.db.exec(`
+    await this.query(`
       CREATE TABLE IF NOT EXISTS votes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        proposalId TEXT NOT NULL,
+        id SERIAL PRIMARY KEY,
+        proposalId TEXT NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
         userId TEXT NOT NULL,
         voteType TEXT NOT NULL,
-        createdAt INTEGER NOT NULL,
+        createdAt BIGINT NOT NULL,
         stage INTEGER DEFAULT 1,
-        UNIQUE(proposalId, userId, stage),
-        FOREIGN KEY (proposalId) REFERENCES proposals (id) ON DELETE CASCADE
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(proposalId, userId, stage)
       )
     `);
 
     // Таблица для встреч
-    this.db.exec(`
+    await this.query(`
       CREATE TABLE IF NOT EXISTS meetings (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL,
@@ -98,437 +128,505 @@ class CongressDatabase {
         meetingDate TEXT NOT NULL,
         channelId TEXT NOT NULL,
         messageId TEXT,
-        createdAt INTEGER NOT NULL,
-        durationMs INTEGER NOT NULL DEFAULT 0,
-        expiresAt INTEGER NOT NULL DEFAULT 0,
-        open INTEGER NOT NULL DEFAULT 0,
+        threadId TEXT,
+        createdAt BIGINT NOT NULL,
+        durationMs BIGINT NOT NULL DEFAULT 0,
+        expiresAt BIGINT NOT NULL DEFAULT 0,
+        open BOOLEAN NOT NULL DEFAULT FALSE,
         quorum INTEGER DEFAULT 0,
         totalMembers INTEGER DEFAULT 53,
-        status TEXT DEFAULT 'planned'
+        status TEXT DEFAULT 'planned',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
     // Таблица для регистраций на встречи
-    this.db.exec(`
+    await this.query(`
       CREATE TABLE IF NOT EXISTS meeting_registrations (
-        meetingId TEXT NOT NULL,
+        meetingId TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
         userId TEXT NOT NULL,
-        registeredAt INTEGER NOT NULL,
-        PRIMARY KEY (meetingId, userId),
-        FOREIGN KEY (meetingId) REFERENCES meetings (id) ON DELETE CASCADE
+        registeredAt BIGINT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (meetingId, userId)
       )
     `);
 
     // Таблица для выступающих
-    this.db.exec(`
+    await this.query(`
       CREATE TABLE IF NOT EXISTS speakers (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        proposalId TEXT NOT NULL,
+        id SERIAL PRIMARY KEY,
+        proposalId TEXT NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
         userId TEXT NOT NULL,
         type TEXT NOT NULL,
         displayName TEXT NOT NULL,
-        registeredAt INTEGER NOT NULL,
-        FOREIGN KEY (proposalId) REFERENCES proposals (id) ON DELETE CASCADE
+        registeredAt BIGINT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
     // Таблица для настроек бота
-    this.db.exec(`
+    await this.query(`
       CREATE TABLE IF NOT EXISTS bot_settings (
         key TEXT PRIMARY KEY,
-        value TEXT
+        value TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    // Добавляем недостающие столбцы
-    this.addMissingColumns();
-
     // Инициализация счетчиков для каждой палаты
     const chambers = ['sf', 'gd_rublevka', 'gd_arbat', 'gd_patricki', 'gd_tverskoy'];
-    chambers.forEach(chamber => {
-      const counter = this.db.prepare('SELECT * FROM chamber_counters WHERE chamberId = ?').get(chamber);
-      if (!counter) {
-        this.db.prepare('INSERT INTO chamber_counters (chamberId, value) VALUES (?, 1)').run(chamber);
-      }
-    });
+    for (const chamber of chambers) {
+      await this.query(`
+        INSERT INTO chamber_counters (chamberId, value) 
+        VALUES ($1, 1) 
+        ON CONFLICT (chamberId) DO NOTHING
+      `, [chamber]);
+    }
+
+    // Создание индексов для оптимизации
+    await this.createIndexes();
   }
 
-  // Метод для добавления недостающих колонок
-  addMissingColumns() {
-    const columnsToAdd = [
-      { table: 'proposals', column: 'chamber', type: 'TEXT' },
-      { table: 'proposals', column: 'parentProposalId', type: 'TEXT' },
-      { table: 'proposals', column: 'events', type: 'TEXT DEFAULT \'[]\'' },
-      { table: 'proposals', column: 'historyMessageId', type: 'TEXT' },
-      { table: 'meetings', column: 'chamber', type: 'TEXT' },
-      { table: 'meetings', column: 'meetingDate', type: 'TEXT' },
-      { table: 'meetings', column: 'totalMembers', type: 'INTEGER DEFAULT 53' },
-      { table: 'meetings', column: 'status', type: 'TEXT DEFAULT \'planned\'' }
+  async createIndexes() {
+    const indexes = [
+      'CREATE INDEX IF NOT EXISTS idx_proposals_chamber ON proposals(chamber)',
+      'CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status)',
+      'CREATE INDEX IF NOT EXISTS idx_proposals_created_at ON proposals(created_at)',
+      'CREATE INDEX IF NOT EXISTS idx_votes_proposal_stage ON votes(proposalId, stage)',
+      'CREATE INDEX IF NOT EXISTS idx_votes_user ON votes(userId)',
+      'CREATE INDEX IF NOT EXISTS idx_meetings_chamber ON meetings(chamber)',
+      'CREATE INDEX IF NOT EXISTS idx_meetings_open ON meetings(open)',
+      'CREATE INDEX IF NOT EXISTS idx_quantitative_items_proposal ON quantitative_items(proposalId)',
+      'CREATE INDEX IF NOT EXISTS idx_speakers_proposal ON speakers(proposalId)',
+      'CREATE INDEX IF NOT EXISTS idx_meeting_registrations_meeting ON meeting_registrations(meetingId)'
     ];
 
-    columnsToAdd.forEach(({ table, column, type }) => {
-      try {
-        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
-        console.log(`Added column ${column} to table ${table}`);
-      } catch (e) {
-        // Колонка уже существует - это нормально
-        if (!e.message.includes('duplicate column name')) {
-          console.error(`Error adding column ${column} to table ${table}:`, e.message);
-        }
-      }
-    });
+    for (const indexSql of indexes) {
+      await this.query(indexSql);
+    }
   }
 
   // Методы для работы с предложениями
-  getNextProposalNumber(chamber) {
-    const result = this.db.prepare('SELECT value FROM chamber_counters WHERE chamberId = ?').get(chamber);
-    const number = String(result.value).padStart(3, '0');
-    const prefix = chamber === 'sf' ? 'СФ' : 'ГД';
-    const fullNumber = `${prefix}-${number}`;
-    this.db.prepare('UPDATE chamber_counters SET value = value + 1 WHERE chamberId = ?').run(chamber);
-    return fullNumber;
+  async getNextProposalNumber(chamber) {
+    try {
+      // Сначала пытаемся обновить существующий счетчик
+      let result = await this.query(
+        'UPDATE chamber_counters SET value = value + 1 WHERE chamberId = $1 RETURNING value',
+        [chamber]
+      );
+      
+      // Если счетчика не было, создаем его и снова пытаемся обновить
+      if (result.rows.length === 0) {
+        await this.query(
+          'INSERT INTO chamber_counters (chamberId, value) VALUES ($1, 1) ON CONFLICT (chamberId) DO NOTHING',
+          [chamber]
+        );
+        result = await this.query(
+          'UPDATE chamber_counters SET value = value + 1 WHERE chamberId = $1 RETURNING value',
+          [chamber]
+        );
+      }
+      
+      // Если все еще нет результата, используем значение по умолчанию
+      if (result.rows.length === 0) {
+        console.warn(`⚠️ Could not get counter for chamber ${chamber}, using default value`);
+        const number = '001';
+        const prefix = chamber === 'sf' ? 'СФ' : 'ГД';
+        return `${prefix}-${number}`;
+      }
+      
+      const number = String(result.rows[0].value).padStart(3, '0');
+      const prefix = chamber === 'sf' ? 'СФ' : 'ГД';
+      return `${prefix}-${number}`;
+    } catch (error) {
+      console.error('❌ Error in getNextProposalNumber:', error);
+      // Fallback на случай ошибки
+      const number = '001';
+      const prefix = chamber === 'sf' ? 'СФ' : 'ГД';
+      return `${prefix}-${number}`;
+    }
   }
 
-  createProposal(proposal) {
-    // Преобразуем events в JSON строку, если это массив
-    const eventsString = Array.isArray(proposal.events) 
-      ? JSON.stringify(proposal.events) 
-      : (proposal.events || '[]');
+  // Метод для получения количества уникальных голосовавших
+  async getUniqueVotersCount(proposalId, stage = 1) {
+    const result = await this.query(
+      `SELECT COUNT(DISTINCT userId) as count 
+       FROM votes 
+       WHERE proposalId = $1 AND stage = $2`,
+      [proposalId, stage]
+    );
+    return parseInt(result.rows[0].count) || 0;
+  }
 
-    const stmt = this.db.prepare(`
+  // Оптимизированный метод для получения голосов с пагинацией
+  async getVotes(proposalId, stage = 1, limit = 1000) {
+    const result = await this.query(
+      'SELECT * FROM votes WHERE proposalId = $1 AND stage = $2 ORDER BY createdAt ASC LIMIT $3',
+      [proposalId, stage, limit]
+    );
+    return result.rows;
+  }
+
+  // Метод для быстрой проверки существования предложения
+  async proposalExists(proposalId) {
+    const result = await this.query(
+      'SELECT 1 FROM proposals WHERE id = $1 LIMIT 1',
+      [proposalId]
+    );
+    return result.rows.length > 0;
+  }
+
+  async createProposal(proposal) {
+    const eventsString = JSON.stringify(proposal.events || []);
+    
+    await this.query(`
       INSERT INTO proposals (
         id, number, name, party, link, chamber, status, createdAt, 
-        authorId, threadId, channelId, speakersMessageId, historyMessageId, initialMessageId, 
+        authorId, threadId, channelId, speakersMessageId, historyMessageId, initialMessageId,
         isQuantitative, parentProposalId, events
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+    `, [
+      proposal.id, proposal.number, proposal.name, proposal.party, proposal.link,
+      proposal.chamber, proposal.status, proposal.createdAt, proposal.authorId,
+      proposal.threadId || null, proposal.channelId || null, 
+      proposal.speakersMessageId || null, proposal.historyMessageId || null,
+      proposal.initialMessageId || null, proposal.isQuantitative || false,
+      proposal.parentProposalId || null, eventsString
+    ]);
+  }
+
+  async getProposal(id) {
+    const result = await this.query('SELECT * FROM proposals WHERE id = $1', [id]);
+    if (result.rows.length === 0) return null;
     
-    return stmt.run(
-      proposal.id,
-      proposal.number,
-      proposal.name,
-      proposal.party,
-      proposal.link,
-      proposal.chamber,
-      proposal.status,
-      proposal.createdAt,
-      proposal.authorId,
-      proposal.threadId || null,
-      proposal.channelId || null,
-      proposal.speakersMessageId || null,
-      proposal.historyMessageId || null,
-      proposal.initialMessageId || null,
-      proposal.isQuantitative || 0,
-      proposal.parentProposalId || null,
-      eventsString
+    const proposal = result.rows[0];
+    if (proposal.events) {
+      proposal.events = typeof proposal.events === 'string' 
+        ? JSON.parse(proposal.events) 
+        : proposal.events;
+    } else {
+      proposal.events = [];
+    }
+    return proposal;
+  }
+
+  async getProposalByNumber(number) {
+    const result = await this.query('SELECT * FROM proposals WHERE number = $1', [number]);
+    if (result.rows.length === 0) return null;
+    
+    const proposal = result.rows[0];
+    if (proposal.events) {
+      proposal.events = typeof proposal.events === 'string' 
+        ? JSON.parse(proposal.events) 
+        : proposal.events;
+    } else {
+      proposal.events = [];
+    }
+    return proposal;
+  }
+
+  async updateProposalEvents(id, events) {
+    await this.query(
+      'UPDATE proposals SET events = $1::JSONB WHERE id = $2',
+      [JSON.stringify(events), id]
     );
   }
 
-  updateProposalEvents(id, events) {
-    const eventsString = Array.isArray(events) ? JSON.stringify(events) : events;
-    this.db.prepare('UPDATE proposals SET events = ? WHERE id = ?').run(eventsString, id);
+  async updateProposalStatus(id, status) {
+    await this.query('UPDATE proposals SET status = $1 WHERE id = $2', [status, id]);
   }
 
-  updateProposalStatus(id, status) {
-    this.db.prepare('UPDATE proposals SET status = ? WHERE id = ?').run(status, id);
+  async updateProposalThread(id, threadId) {
+    await this.query('UPDATE proposals SET threadId = $1 WHERE id = $2', [threadId, id]);
   }
 
-  updateProposalChannel(id, channelId) {
-    this.db.prepare('UPDATE proposals SET channelId = ? WHERE id = ?').run(channelId, id);
+  async updateProposalSpeakersMessage(id, messageId) {
+    await this.query('UPDATE proposals SET speakersMessageId = $1 WHERE id = $2', [messageId, id]);
   }
 
-  updateProposalThread(id, threadId) {
-    this.db.prepare('UPDATE proposals SET threadId = ? WHERE id = ?').run(threadId, id);
+  async updateProposalHistoryMessage(id, messageId) {
+    await this.query('UPDATE proposals SET historyMessageId = $1 WHERE id = $2', [messageId, id]);
   }
 
-  updateProposalSpeakersMessage(id, messageId) {
-    this.db.prepare('UPDATE proposals SET speakersMessageId = ? WHERE id = ?').run(messageId, id);
+  async updateProposalInitialMessage(id, messageId) {
+    await this.query('UPDATE proposals SET initialMessageId = $1 WHERE id = $2', [messageId, id]);
   }
 
-  updateProposalHistoryMessage(id, messageId) {
-    this.db.prepare('UPDATE proposals SET historyMessageId = ? WHERE id = ?').run(messageId, id);
+  async updateProposalChannel(id, channelId) {
+    await this.query('UPDATE proposals SET channelId = $1 WHERE id = $2', [channelId, id]);
   }
 
-  updateProposalInitialMessage(id, messageId) {
-    this.db.prepare('UPDATE proposals SET initialMessageId = ? WHERE id = ?').run(messageId, id);
+  async getAllProposals() {
+    const result = await this.query('SELECT * FROM proposals ORDER BY createdAt DESC');
+    return result.rows.map(proposal => ({
+      ...proposal,
+      events: typeof proposal.events === 'string' ? JSON.parse(proposal.events) : proposal.events
+    }));
   }
 
-  getProposal(id) {
-    const proposal = this.db.prepare('SELECT * FROM proposals WHERE id = ?').get(id);
-    if (proposal && proposal.events) {
-      try {
-        proposal.events = JSON.parse(proposal.events);
-      } catch (e) {
-        console.error('Error parsing events JSON:', e);
-        proposal.events = [];
-      }
-    } else if (proposal) {
-      proposal.events = [];
-    }
-    return proposal;
+  async getProposalsByChamber(chamber) {
+    const result = await this.query(
+      'SELECT * FROM proposals WHERE chamber = $1 ORDER BY createdAt DESC',
+      [chamber]
+    );
+    return result.rows.map(proposal => ({
+      ...proposal,
+      events: typeof proposal.events === 'string' ? JSON.parse(proposal.events) : proposal.events
+    }));
   }
 
-  getProposalByNumber(number) {
-    const proposal = this.db.prepare('SELECT * FROM proposals WHERE number = ?').get(number);
-    if (proposal && proposal.events) {
-      try {
-        proposal.events = JSON.parse(proposal.events);
-      } catch (e) {
-        console.error('Error parsing events JSON:', e);
-        proposal.events = [];
-      }
-    } else if (proposal) {
-      proposal.events = [];
-    }
-    return proposal;
-  }
-
-  getAllProposals() {
-    const proposals = this.db.prepare('SELECT * FROM proposals ORDER BY createdAt DESC').all();
-    return proposals.map(proposal => {
-      if (proposal.events) {
-        try {
-          proposal.events = JSON.parse(proposal.events);
-        } catch (e) {
-          console.error('Error parsing events JSON:', e);
-          proposal.events = [];
-        }
-      } else {
-        proposal.events = [];
-      }
-      return proposal;
-    });
-  }
-
-  getProposalsByChamber(chamber) {
-    const proposals = this.db.prepare('SELECT * FROM proposals WHERE chamber = ? ORDER BY createdAt DESC').all(chamber);
-    return proposals.map(proposal => {
-      if (proposal.events) {
-        try {
-          proposal.events = JSON.parse(proposal.events);
-        } catch (e) {
-          console.error('Error parsing events JSON:', e);
-          proposal.events = [];
-        }
-      } else {
-        proposal.events = [];
-      }
-      return proposal;
-    });
-  }
-
-  deleteProposal(id) {
-    return this.db.prepare('DELETE FROM proposals WHERE id = ?').run(id);
+  async deleteProposal(id) {
+    await this.query('DELETE FROM proposals WHERE id = $1', [id]);
   }
 
   // Методы для работы с пунктами количественного голосования
-  addQuantitativeItem(item) {
-    const stmt = this.db.prepare(`
-      INSERT INTO quantitative_items (proposalId, itemIndex, text)
-      VALUES (?, ?, ?)
-    `);
-    return stmt.run(item.proposalId, item.itemIndex, item.text);
+  async addQuantitativeItem(item) {
+    await this.query(
+      'INSERT INTO quantitative_items (proposalId, itemIndex, text) VALUES ($1, $2, $3)',
+      [item.proposalId, item.itemIndex, item.text]
+    );
   }
 
-  getQuantitativeItems(proposalId) {
-    return this.db.prepare('SELECT * FROM quantitative_items WHERE proposalId = ? ORDER BY itemIndex').all(proposalId);
+  async getQuantitativeItems(proposalId) {
+    const result = await this.query(
+      'SELECT * FROM quantitative_items WHERE proposalId = $1 ORDER BY itemIndex',
+      [proposalId]
+    );
+    return result.rows;
   }
 
   // Методы для работы с голосованиями
-  startVoting(voting) {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO votings (proposalId, open, startedAt, durationMs, expiresAt, messageId, isSecret, formula, stage, runoffMessageId)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    return stmt.run(
-      voting.proposalId,
-      voting.open,
-      voting.startedAt,
-      voting.durationMs,
-      voting.expiresAt,
-      voting.messageId,
-      voting.isSecret,
-      voting.formula,
-      voting.stage || 1,
-      voting.runoffMessageId || null
+  async startVoting(voting) {
+    await this.query(`
+      INSERT INTO votings 
+      (proposalId, open, startedAt, durationMs, expiresAt, messageId, isSecret, formula, stage, runoffMessageId)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ON CONFLICT (proposalId) DO UPDATE SET
+        open = EXCLUDED.open,
+        startedAt = EXCLUDED.startedAt,
+        durationMs = EXCLUDED.durationMs,
+        expiresAt = EXCLUDED.expiresAt,
+        messageId = EXCLUDED.messageId,
+        isSecret = EXCLUDED.isSecret,
+        formula = EXCLUDED.formula,
+        stage = EXCLUDED.stage,
+        runoffMessageId = EXCLUDED.runoffMessageId
+    `, [
+      voting.proposalId, voting.open, voting.startedAt, voting.durationMs,
+      voting.expiresAt, voting.messageId, voting.isSecret, voting.formula,
+      voting.stage || 1, voting.runoffMessageId || null
+    ]);
+  }
+
+  async endVoting(proposalId, endedAt) {
+    await this.query(
+      'UPDATE votings SET open = FALSE, endedAt = $1 WHERE proposalId = $2',
+      [endedAt, proposalId]
     );
   }
 
-  endVoting(proposalId, endedAt) {
-    this.db.prepare('UPDATE votings SET open = 0, endedAt = ? WHERE proposalId = ?').run(endedAt, proposalId);
+  async getVoting(proposalId) {
+    const result = await this.query('SELECT * FROM votings WHERE proposalId = $1', [proposalId]);
+    return result.rows[0] || null;
   }
 
-  getVoting(proposalId) {
-    return this.db.prepare('SELECT * FROM votings WHERE proposalId = ?').get(proposalId);
-  }
-
-  getOpenVotings() {
-    return this.db.prepare(`
-      SELECT p.*, v.open, v.startedAt, v.endedAt, v.durationMs, v.expiresAt, v.messageId, v.isSecret, v.formula, v.stage
+  async getOpenVotings() {
+    const result = await this.query(`
+      SELECT p.*, v.open, v.startedAt, v.endedAt, v.durationMs, v.expiresAt, 
+             v.messageId, v.isSecret, v.formula, v.stage, v.runoffMessageId
       FROM proposals p 
       JOIN votings v ON p.id = v.proposalId 
-      WHERE v.open = 1
-    `).all();
+      WHERE v.open = TRUE
+    `);
+    return result.rows;
   }
 
   // Методы для работы с голосами
-  addVote(vote) {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO votes (proposalId, userId, voteType, createdAt, stage)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    return stmt.run(vote.proposalId, vote.userId, vote.voteType, vote.createdAt, vote.stage || 1);
+  async addVote(vote) {
+    await this.query(`
+      INSERT INTO votes (proposalId, userId, voteType, createdAt, stage)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (proposalId, userId, stage) DO UPDATE SET
+        voteType = EXCLUDED.voteType,
+        createdAt = EXCLUDED.createdAt
+    `, [vote.proposalId, vote.userId, vote.voteType, vote.createdAt, vote.stage || 1]);
   }
 
-  getVotes(proposalId, stage = 1) {
-    return this.db.prepare('SELECT * FROM votes WHERE proposalId = ? AND stage = ?').all(proposalId, stage);
-  }
-
-  getVoteCounts(proposalId, stage = 1) {
-    return this.db.prepare(`
+  async getVoteCounts(proposalId, stage = 1) {
+    const result = await this.query(`
       SELECT voteType, COUNT(*) as count 
       FROM votes 
-      WHERE proposalId = ? AND stage = ?
+      WHERE proposalId = $1 AND stage = $2
       GROUP BY voteType
-    `).all(proposalId, stage);
+    `, [proposalId, stage]);
+    return result.rows;
   }
 
   // Методы для работы с встречами
-  createMeeting(meeting) {
-    const stmt = this.db.prepare(`
-      INSERT INTO meetings (id, title, chamber, meetingDate, channelId, messageId, createdAt, durationMs, expiresAt, open, quorum, totalMembers, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    return stmt.run(
-      meeting.id,
-      meeting.title,
-      meeting.chamber,
-      meeting.meetingDate,
-      meeting.channelId,
-      meeting.messageId,
-      meeting.createdAt,
-      meeting.durationMs,
-      meeting.expiresAt,
-      meeting.open,
-      meeting.quorum,
-      meeting.totalMembers,
-      meeting.status
+  async createMeeting(meeting) {
+    await this.query(`
+      INSERT INTO meetings 
+      (id, title, chamber, meetingDate, channelId, messageId, threadId, createdAt, durationMs, expiresAt, open, quorum, totalMembers, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+    `, [
+      meeting.id, meeting.title, meeting.chamber, meeting.meetingDate,
+      meeting.channelId, meeting.messageId, meeting.threadId, meeting.createdAt, meeting.durationMs,
+      meeting.expiresAt, meeting.open, meeting.quorum, meeting.totalMembers, meeting.status
+    ]);
+  }
+
+  async updateMeeting(id, updates) {
+    const fields = [];
+    const values = [];
+    let paramCount = 1;
+
+    for (const [key, value] of Object.entries(updates)) {
+      fields.push(`${key} = $${paramCount}`);
+      values.push(value);
+      paramCount++;
+    }
+
+    values.push(id);
+    await this.query(
+      `UPDATE meetings SET ${fields.join(', ')} WHERE id = $${paramCount}`,
+      values
     );
   }
 
-  updateMeeting(id, updates) {
-    const fields = [];
-    const values = [];
-    
-    for (const [key, value] of Object.entries(updates)) {
-      fields.push(`${key} = ?`);
-      values.push(value);
-    }
-    
-    values.push(id);
-    
-    const stmt = this.db.prepare(`
-      UPDATE meetings SET ${fields.join(', ')} WHERE id = ?
+  async getMeeting(id) {
+    const result = await this.query('SELECT * FROM meetings WHERE id = $1', [id]);
+    return result.rows[0] || null;
+  }
+
+  async getAllMeetings() {
+    const result = await this.query('SELECT * FROM meetings ORDER BY createdAt DESC');
+    return result.rows;
+  }
+
+  async getOpenMeetings() {
+    const result = await this.query('SELECT * FROM meetings WHERE open = TRUE');
+    return result.rows;
+  }
+
+  async getActiveMeetings() {
+    const result = await this.query(`
+      SELECT * FROM meetings 
+      WHERE open = TRUE OR status = 'voting'
     `);
-    return stmt.run(...values);
+    return result.rows;
   }
 
-  getMeeting(id) {
-    return this.db.prepare('SELECT * FROM meetings WHERE id = ?').get(id);
+  async getLastMeetingByChamber(chamber) {
+    const result = await this.query(`
+      SELECT * FROM meetings 
+      WHERE chamber = $1 
+      ORDER BY createdAt DESC 
+      LIMIT 1
+    `, [chamber]);
+    return result.rows[0] || null;
   }
 
-  getAllMeetings() {
-    return this.db.prepare('SELECT * FROM meetings ORDER BY createdAt DESC').all();
+  async updateMeetingMessage(id, messageId) {
+    await this.query('UPDATE meetings SET messageId = $1 WHERE id = $2', [messageId, id]);
   }
 
-  getOpenMeetings() {
-    return this.db.prepare('SELECT * FROM meetings WHERE open = 1').all();
+  async updateMeetingThread(id, threadId) {
+    await this.query('UPDATE meetings SET threadId = $1 WHERE id = $2', [threadId, id]);
   }
 
-  getActiveMeetings() {
-    return this.db.prepare('SELECT * FROM meetings WHERE open = 1 OR status = \'voting\'').all();
-  }
-
-  getLastMeetingByChamber(chamber) {
-    return this.db.prepare('SELECT * FROM meetings WHERE chamber = ? ORDER BY createdAt DESC LIMIT 1').get(chamber);
-  }
-
-  updateMeetingMessage(id, messageId) {
-    this.db.prepare('UPDATE meetings SET messageId = ? WHERE id = ?').run(messageId, id);
-  }
-
-  closeMeeting(id) {
-    this.db.prepare('UPDATE meetings SET open = 0 WHERE id = ?').run(id);
+  async closeMeeting(id) {
+    await this.query('UPDATE meetings SET open = FALSE WHERE id = $1', [id]);
   }
 
   // Методы для работы с регистрациями на встречи
-  registerForMeeting(meetingId, userId) {
-    const stmt = this.db.prepare(`
-      INSERT OR IGNORE INTO meeting_registrations (meetingId, userId, registeredAt)
-      VALUES (?, ?, ?)
-    `);
-    return stmt.run(meetingId, userId, Date.now());
+  async registerForMeeting(meetingId, userId) {
+    await this.query(`
+      INSERT INTO meeting_registrations (meetingId, userId, registeredAt)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (meetingId, userId) DO NOTHING
+    `, [meetingId, userId, Date.now()]);
   }
 
-  getMeetingRegistrations(meetingId) {
-    return this.db.prepare('SELECT userId FROM meeting_registrations WHERE meetingId = ?').all(meetingId);
+  async getMeetingRegistrations(meetingId) {
+    const result = await this.query(
+      'SELECT userId FROM meeting_registrations WHERE meetingId = $1',
+      [meetingId]
+    );
+    return result.rows;
   }
 
-  isUserRegistered(meetingId, userId) {
-    const result = this.db.prepare('SELECT 1 FROM meeting_registrations WHERE meetingId = ? AND userId = ?').get(meetingId, userId);
-    return !!result;
+  async isUserRegistered(meetingId, userId) {
+    const result = await this.query(
+      'SELECT 1 FROM meeting_registrations WHERE meetingId = $1 AND userId = $2',
+      [meetingId, userId]
+    );
+    return result.rows.length > 0;
   }
 
-  getRegistrationCount(meetingId) {
-    const result = this.db.prepare('SELECT COUNT(*) as count FROM meeting_registrations WHERE meetingId = ?').get(meetingId);
-    return result.count;
+  async getRegistrationCount(meetingId) {
+    const result = await this.query(
+      'SELECT COUNT(*) as count FROM meeting_registrations WHERE meetingId = $1',
+      [meetingId]
+    );
+    return parseInt(result.rows[0].count);
   }
 
-  // Новый метод для получения времени регистрации
-  getRegistrationTime(meetingId, userId) {
-    const result = this.db.prepare('SELECT registeredAt FROM meeting_registrations WHERE meetingId = ? AND userId = ?').get(meetingId, userId);
-    return result ? result.registeredAt : null;
+  async getRegistrationTime(meetingId, userId) {
+    const result = await this.query(
+      'SELECT registeredAt FROM meeting_registrations WHERE meetingId = $1 AND userId = $2',
+      [meetingId, userId]
+    );
+    return result.rows[0]?.registeredat || null;
   }
 
   // Методы для работы с выступающими
-  addSpeaker(speaker) {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO speakers (proposalId, userId, type, displayName, registeredAt)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-    return stmt.run(
-      speaker.proposalId,
-      speaker.userId,
-      speaker.type,
-      speaker.displayName,
-      speaker.registeredAt
+  async addSpeaker(speaker) {
+    await this.query(`
+      INSERT INTO speakers (proposalId, userId, type, displayName, registeredAt)
+      VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (proposalId, userId) DO UPDATE SET
+        type = EXCLUDED.type,
+        displayName = EXCLUDED.displayName,
+        registeredAt = EXCLUDED.registeredAt
+    `, [
+      speaker.proposalId, speaker.userId, speaker.type,
+      speaker.displayName, speaker.registeredAt
+    ]);
+  }
+
+  async getSpeakers(proposalId) {
+    const result = await this.query(
+      'SELECT * FROM speakers WHERE proposalId = $1 ORDER BY registeredAt ASC',
+      [proposalId]
+    );
+    return result.rows;
+  }
+
+  async removeSpeaker(proposalId, userId) {
+    await this.query(
+      'DELETE FROM speakers WHERE proposalId = $1 AND userId = $2',
+      [proposalId, userId]
     );
   }
 
-  getSpeakers(proposalId) {
-    return this.db.prepare('SELECT * FROM speakers WHERE proposalId = ? ORDER BY registeredAt ASC').all(proposalId);
-  }
-
-  removeSpeaker(proposalId, userId) {
-    return this.db.prepare('DELETE FROM speakers WHERE proposalId = ? AND userId = ?').run(proposalId, userId);
-  }
-
   // Методы для работы с настройками
-  getBotSetting(key) {
-    const result = this.db.prepare('SELECT value FROM bot_settings WHERE key = ?').get(key);
-    return result ? result.value : null;
+  async getBotSetting(key) {
+    const result = await this.query('SELECT value FROM bot_settings WHERE key = $1', [key]);
+    return result.rows[0]?.value || null;
   }
 
-  setBotSetting(key, value) {
-    const stmt = this.db.prepare(`
-      INSERT OR REPLACE INTO bot_settings (key, value)
-      VALUES (?, ?)
-    `);
-    return stmt.run(key, value);
+  async setBotSetting(key, value) {
+    await this.query(`
+      INSERT INTO bot_settings (key, value)
+      VALUES ($1, $2)
+      ON CONFLICT (key) DO UPDATE SET
+        value = EXCLUDED.value
+    `, [key, value]);
   }
 
-  close() {
-    this.db.close();
+  // Закрытие соединения
+  async close() {
+    await this.pool.end();
   }
 }
 
