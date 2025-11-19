@@ -1,10 +1,10 @@
-// index.js (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+// index.js (ОПТИМИЗИРОВАННАЯ ВЕРСИЯ)
 
 /**
  * Бот для управления законодательными процессами 
  * с поддержкой Государственных Дум и Совета Федерации
  * Made by Валерий Зорькин 
- * Версия 3.2 - Исправленная
+ * Версия 4.0 - Оптимизированная
  */
 
 import 'dotenv/config';
@@ -62,14 +62,8 @@ const MEETING_MENTION_ROLES = {
   'gd_tverskoy': process.env.GD_TVERSKOY_MENTION_ROLE_ID
 };
 
-// ID ролей для голосования
-const VOTER_ROLES_BY_CHAMBER = {
-  'sf': process.env.SF_VOTER_ROLE_ID,
-  'gd_rublevka': process.env.GD_RUBLEVKA_VOTER_ROLE_ID,
-  'gd_arbat': process.env.GD_ARBAT_VOTER_ROLE_ID,
-  'gd_patricki': process.env.GD_PATRICKI_VOTER_ROLE_ID,
-  'gd_tverskoy': process.env.GD_TVERSKOY_VOTER_ROLE_ID
-};
+// ЕДИНАЯ роль для голосования (используем роль Совета Федерации для всех)
+const VOTER_ROLE_ID = process.env.SF_VOTER_ROLE_ID;
 
 // ID ролей
 const ROLES = {
@@ -115,7 +109,8 @@ function validateConfig() {
     'DEPUTY_NO_VOTE_ROLE_ID', 'CHAIRMAN_ROLE_ID', 'VICE_CHAIRMAN_ROLE_ID',
     'GOVERNMENT_CHAIRMAN_ROLE_ID', 'PRESIDENT_USER_ID',
     'RUBLEVKA_ROLE_ID', 'ARBAT_ROLE_ID', 'PATRICKI_ROLE_ID', 'TVERSKOY_ROLE_ID',
-    'ADMIN_ROLE_SEND_ID', 'SYSADMIN_ROLE_ID'
+    'ADMIN_ROLE_SEND_ID', 'SYSADMIN_ROLE_ID',
+    'SF_VOTER_ROLE_ID' // Единая роль для голосования
   ];
 
   const missing = requiredEnvVars.filter(key => !process.env[key]);
@@ -398,6 +393,40 @@ function getAvailableChambers(member) {
   }
   
   return available;
+}
+
+// Функция для проверки возможности голосования
+async function canUserVote(proposal, userId, voting) {
+  // Проверяем наличие единой роли голосования
+  try {
+    const guild = client.guilds.cache.get(GUILD_ID);
+    const member = await guild.members.fetch(userId);
+    
+    if (!member.roles.cache.has(VOTER_ROLE_ID)) {
+      return { canVote: false, reason: "❌ У вас нет роли для голосования." };
+    }
+    
+    // Если голосование длится больше 1 дня, не проверяем регистрацию на заседание
+    if (voting.durationMs > 24 * 60 * 60 * 1000 || voting.durationMs === 0) {
+      return { canVote: true };
+    }
+    
+    // Для коротких голосований проверяем регистрацию на последнее заседание в палате
+    const lastMeeting = await db.getLastMeetingByChamber(proposal.chamber);
+    if (!lastMeeting) {
+      return { canVote: false, reason: "❌ Не найдено заседание для этой палаты." };
+    }
+    
+    const isRegistered = await db.isUserRegistered(lastMeeting.id, userId);
+    if (!isRegistered) {
+      return { canVote: false, reason: "❌ Вы не зарегистрированы на последнее заседание этой палаты." };
+    }
+    
+    return { canVote: true };
+  } catch (error) {
+    console.error("❌ Error checking voting permission:", error);
+    return { canVote: false, reason: "❌ Ошибка проверки прав голосования." };
+  }
 }
 
 /* ===== In-memory timers ===== */
@@ -690,24 +719,23 @@ async function startMeetingTicker(meetingId) {
           
         await msg.edit({ content: null, embeds: [finalEmbed], components: [buttonsRow] });
         
-        // ВЫДАЕМ РОЛИ ДЛЯ ГОЛОСОВАНИЯ
+        // ВЫДАЕМ ЕДИНУЮ РОЛЬ ДЛЯ ГОЛОСОВАНИЯ
         if (isQuorumMet) {
-          const voterRoleId = VOTER_ROLES_BY_CHAMBER[meeting.chamber];
           let rolesGiven = 0;
           let alreadyHadRoles = 0;
           
           for (const reg of registered) {
             try {
               const member = await ch.guild.members.fetch(reg.userid);
-              if (!member.roles.cache.has(voterRoleId)) {
-                await member.roles.add(voterRoleId, `Registered for meeting ${meeting.title}`);
+              if (!member.roles.cache.has(VOTER_ROLE_ID)) {
+                await member.roles.add(VOTER_ROLE_ID, `Registered for meeting ${meeting.title}`);
                 rolesGiven++;
-                console.log(`✅ Выдана роль голосования пользователю ${member.user.tag} для заседания ${meeting.title}`);
+                console.log(`✅ Выдана единая роль голосования пользователю ${member.user.tag} для заседания ${meeting.title}`);
               } else {
                 alreadyHadRoles++;
               }
             } catch (e) {
-              console.error(`❌ Ошибка при выдаче роли голосования пользователю ${reg.userid}:`, e);
+              console.error(`❌ Ошибка при выдаче единой роли голосования пользователю ${reg.userid}:`, e);
             }
           }
           
@@ -722,9 +750,9 @@ async function startMeetingTicker(meetingId) {
           
           // Отправляем сообщение о успешной выдаче ролей В ВЕТКУ
           if (rolesGiven > 0) {
-            await thread.send(`✅ **Роли для голосования выданы!** Успешно выдано ${rolesGiven} ролей из ${registeredCount} зарегистрированных.`);
+            await thread.send(`✅ **Единая роль для голосования выдана!** Успешно выдано ${rolesGiven} ролей из ${registeredCount} зарегистрированных.`);
           } else {
-            await thread.send(`ℹ️ **Все зарегистрированные уже имеют роли для голосования.** (${alreadyHadRoles} участников)`);
+            await thread.send(`ℹ️ **Все зарегистрированные уже имеют единую роль для голосования.** (${alreadyHadRoles} участников)`);
           }
         } else {
           // Если кворум не собран, создаем ветку и уведомляем в ВЕТКУ
@@ -738,11 +766,11 @@ async function startMeetingTicker(meetingId) {
             await db.updateMeetingThread(meetingId, thread.id);
             
             // Отправляем сообщение о неудачном кворуме в ВЕТКУ
-            await thread.send(`❌ **Кворум не собран!** Зарегистрировано ${registeredCount} из ${quorum} необходимых участников. Роли для голосования не выданы.`);
+            await thread.send(`❌ **Кворум не собран!** Зарегистрировано ${registeredCount} из ${quorum} необходимых участников. Роль для голосования не выдана.`);
           } catch (threadError) {
             console.error("❌ Error creating thread for failed quorum:", threadError);
             // Если не удалось создать ветку, отправляем в основной канал
-            await ch.send(`❌ **Кворум не собран!** Зарегистрировано ${registeredCount} из ${quorum} необходимых участников. Роли для голосования не выданы.`);
+            await ch.send(`❌ **Кворум не собран!** Зарегистрировано ${registeredCount} из ${quorum} необходимых участников. Роль для голосования не выдана.`);
           }
         }
         
@@ -1520,7 +1548,7 @@ async function showHelp(interaction) {
   description += `• Голосования могут быть открытыми или тайными\n`;
   description += `• Поддерживаются разные формулы подсчета голосов\n`;
   description += `• Ведется полная хронология рассмотрения\n`;
-  description += `• Автоматическая выдача ролей для голосования\n`;
+  description += `• Автоматическая выдача единой роли для голосования\n`;
   
   const helpEmbed = new EmbedBuilder()
     .setTitle('📖 Справка по использованию бота')
@@ -1655,21 +1683,19 @@ async function resetMeetingRoles(interaction) {
     const guildMembers = await interaction.guild.members.fetch();
     let count = 0;
     
-    // Снимаем все роли для голосования
+    // Снимаем единую роль для голосования у всех
     for (const [, m] of guildMembers) {
-      for (const roleId of Object.values(VOTER_ROLES_BY_CHAMBER)) {
-        if (m.roles.cache.has(roleId)) {
-          try {
-            await m.roles.remove(roleId, "Снято командой /res_meeting");
-            count++;
-          } catch (e) {
-            console.error("❌ Failed to remove role:", m.id, e);
-          }
+      if (m.roles.cache.has(VOTER_ROLE_ID)) {
+        try {
+          await m.roles.remove(VOTER_ROLE_ID, "Снято командой /res_meeting");
+          count++;
+        } catch (e) {
+          console.error("❌ Failed to remove role:", m.id, e);
         }
       }
     }
     
-    await interaction.followUp({ content: `✅ Роли сняты у ${count} участников.`, flags: 64 });
+    await interaction.followUp({ content: `✅ Единая роль для голосования снята у ${count} участников.`, flags: 64 });
   } catch (e) {
     console.error("❌ Error in res_meeting:", e);
     await interaction.followUp({ content: "❌ Ошибка при снятии ролей.", flags: 64 });
@@ -2391,9 +2417,32 @@ async function handlePostponeMeetingModal(interaction) {
 async function handleRejectLateModal(interaction) {
   await interaction.deferReply({ flags: 64 });
   
-  const parts = interaction.customId.split("_");
-  const meetingId = parts[3];
-  const userId = parts[4];
+  // ИСПРАВЛЕНИЕ: Правильно извлекаем meetingId и userId из customId
+  const customId = interaction.customId;
+  const prefix = "reject_late_modal_";
+  
+  if (!customId.startsWith(prefix)) {
+    await interaction.editReply({ content: "❌ Ошибка: неверный формат команды." });
+    return;
+  }
+  
+  // Убираем префикс и разбиваем оставшуюся часть
+  const rest = customId.slice(prefix.length);
+  const parts = rest.split('_');
+  
+  // ИСПРАВЛЕНИЕ: meetingId может содержать подчеркивания, userId всегда последний
+  if (parts.length < 2) {
+    await interaction.editReply({ content: "❌ Ошибка: неверный формат команды." });
+    return;
+  }
+  
+  // userId - последний элемент
+  const userId = parts[parts.length - 1];
+  // meetingId - все элементы кроме последнего, объединенные обратно
+  const meetingId = parts.slice(0, -1).join('_');
+  
+  console.log(`🔍 Extracted meetingId: ${meetingId}, userId: ${userId}`);
+  
   const reason = interaction.fields.getTextInputValue("reject_reason");
   
   const meeting = await db.getMeeting(meetingId);
@@ -2584,7 +2633,7 @@ async function handleGetCardButton(interaction) {
       await db.registerForMeeting(meetingId, interaction.user.id);
     }
     
-    await safeReply(interaction, "✅ Вы зарегистрированы! Роль для голосования будет выдана после завершения регистрации, если будет собран кворум.");
+    await safeReply(interaction, "✅ Вы зарегистрированы! Единая роль для голосования будет выдана после завершения регистрации, если будет собран кворум.");
   } catch (error) {
     console.error("❌ Error in get card button:", error);
     await safeReply(interaction, "❌ Ошибка при регистрации.");
@@ -2609,18 +2658,19 @@ async function handleClearRolesButton(interaction) {
   await interaction.deferReply({ flags: 64 });
   
   try {
-    const voterRoleId = VOTER_ROLES_BY_CHAMBER[meeting.chamber];
-    const guildMembers = await interaction.guild.members.fetch();
+    const registeredUsers = await db.getMeetingRegistrations(meetingId);
     let count = 0;
     
-    for (const [, m] of guildMembers) {
-      if (m.roles.cache.has(voterRoleId)) {
-        try {
-          await m.roles.remove(voterRoleId, `Очистка ролей после заседания ${meeting.title}`);
+    // Снимаем единую роль только у зарегистрированных на это заседание
+    for (const reg of registeredUsers) {
+      try {
+        const member = await interaction.guild.members.fetch(reg.userid);
+        if (member.roles.cache.has(VOTER_ROLE_ID)) {
+          await member.roles.remove(VOTER_ROLE_ID, `Очистка ролей после заседания ${meeting.title}`);
           count++;
-        } catch (e) {
-          console.error("❌ Failed to remove role:", m.id, e);
         }
+      } catch (e) {
+        console.error("❌ Failed to remove role:", reg.userid, e);
       }
     }
     
@@ -2638,7 +2688,7 @@ async function handleClearRolesButton(interaction) {
             { name: "📅 Дата заседания", value: meeting.meetingdate, inline: true },
             { name: "👤 Завершил", value: `<@${interaction.user.id}>`, inline: true },
             { name: "🕐 Время завершения", value: formatMoscowTime(Date.now()), inline: true },
-            { name: "🎫 Карточки регистрации изъяты", value: `У ${count} участников`, inline: false }
+            { name: "🎫 Карточки регистрации изъяты", value: `У ${count} зарегистрированных участников`, inline: false }
           )
           .setColor(COLORS.SUCCESS)
           .setFooter({ text: FOOTER })
@@ -2656,13 +2706,13 @@ async function handleClearRolesButton(interaction) {
         }, 30000);
         
         await interaction.editReply({ 
-          content: `✅ Сообщение о завершении заседания отправлено в ветку. Карточки регистрации изъяты у ${count} участников.` 
+          content: `✅ Сообщение о завершении заседания отправлено в ветку. Единая роль для голосования снята у ${count} зарегистрированных участников.` 
         });
         
       } catch (threadError) {
         console.error("❌ Error sending message to thread:", threadError);
         await interaction.editReply({ 
-          content: `✅ Роли очищены у ${count} участников. (Ошибка отправки в ветку)` 
+          content: `✅ Единая роль для голосования снята у ${count} зарегистрированных участников. (Ошибка отправки в ветку)` 
         });
       }
     } else {
@@ -2675,7 +2725,7 @@ async function handleClearRolesButton(interaction) {
           { name: "📅 Дата заседания", value: meeting.meetingdate, inline: true },
           { name: "👤 Завершил", value: `<@${interaction.user.id}>`, inline: true },
           { name: "🕐 Время завершения", value: formatMoscowTime(Date.now()), inline: true },
-          { name: "🎫 Карточки регистрации изъяты", value: `У ${count} участников`, inline: false }
+          { name: "🎫 Карточки регистрации изъяты", value: `У ${count} зарегистрированных участников`, inline: false }
         )
         .setColor(COLORS.SUCCESS)
         .setFooter({ text: FOOTER })
@@ -2684,7 +2734,7 @@ async function handleClearRolesButton(interaction) {
       await ch.send({ embeds: [embed] });
       
       await interaction.editReply({ 
-        content: `✅ Сообщение о завершении заседания отправлено. Карточки регистрации изъяты у ${count} участников.` 
+        content: `✅ Сообщение о завершении заседания отправлено. Единая роль для голосования снята у ${count} зарегистрированных участников.` 
       });
     }
     
@@ -2778,9 +2828,31 @@ async function handleLateRegistrationButton(interaction) {
 }
 
 async function handleApproveLateButton(interaction) {
-  const parts = interaction.customId.split("_");
-  const meetingId = parts[2];
-  const userId = parts[3];
+  // ИСПРАВЛЕНИЕ: Правильно извлекаем meetingId и userId из customId
+  const customId = interaction.customId;
+  const prefix = "approve_late_";
+  
+  if (!customId.startsWith(prefix)) {
+    await interaction.reply({ content: "❌ Ошибка: неверный формат команды.", flags: 64 });
+    return;
+  }
+  
+  // Убираем префикс и разбиваем оставшуюся часть
+  const rest = customId.slice(prefix.length);
+  const parts = rest.split('_');
+  
+  // ИСПРАВЛЕНИЕ: meetingId может содержать подчеркивания, userId всегда последний
+  if (parts.length < 2) {
+    await interaction.reply({ content: "❌ Ошибка: неверный формат команды.", flags: 64 });
+    return;
+  }
+  
+  // userId - последний элемент
+  const userId = parts[parts.length - 1];
+  // meetingId - все элементы кроме последнего, объединенные обратно
+  const meetingId = parts.slice(0, -1).join('_');
+  
+  console.log(`🔍 Extracted meetingId: ${meetingId}, userId: ${userId}`);
   
   const meeting = await db.getMeeting(meetingId);
   if (!meeting) {
@@ -2802,10 +2874,9 @@ async function handleApproveLateButton(interaction) {
       await db.registerForMeeting(meetingId, userId);
     }
 
-    // Выдаем роль для голосования
-    const voterRoleId = VOTER_ROLES_BY_CHAMBER[meeting.chamber];
+    // Выдаем единую роль для голосования
     const guildMember = await interaction.guild.members.fetch(userId);
-    await guildMember.roles.add(voterRoleId, `Поздняя регистрация для заседания ${meeting.title}`);
+    await guildMember.roles.add(VOTER_ROLE_ID, `Поздняя регистрация для заседания ${meeting.title}`);
 
     // Обновляем сообщение со списком зарегистрированных
     const ch = await client.channels.fetch(meeting.channelid);
@@ -2853,12 +2924,12 @@ async function handleApproveLateButton(interaction) {
     await interaction.message.edit({ components: [] });
 
     await interaction.editReply({ 
-      content: `✅ Пользователь <@${userId}> успешно зарегистрирован и получил роль для голосования.` 
+      content: `✅ Пользователь <@${userId}> успешно зарегистрирован и получил единую роль для голосования.` 
     });
 
     // Отправляем уведомление в ветку
     await interaction.followUp({ 
-      content: `✅ <@${userId}> был зарегистрирован на заседание "${meeting.title}" с выдачей роли для голосования.` 
+      content: `✅ <@${userId}> был зарегистрирован на заседание "${meeting.title}" с выдачей единой роли для голосования.` 
     });
 
   } catch (e) {
@@ -2868,9 +2939,31 @@ async function handleApproveLateButton(interaction) {
 }
 
 async function handleRejectLateButton(interaction) {
-  const parts = interaction.customId.split("_");
-  const meetingId = parts[2];
-  const userId = parts[3];
+  // ИСПРАВЛЕНИЕ: Правильно извлекаем meetingId и userId из customId
+  const customId = interaction.customId;
+  const prefix = "reject_late_";
+  
+  if (!customId.startsWith(prefix)) {
+    await interaction.reply({ content: "❌ Ошибка: неверный формат команды.", flags: 64 });
+    return;
+  }
+  
+  // Убираем префикс и разбиваем оставшуюся часть
+  const rest = customId.slice(prefix.length);
+  const parts = rest.split('_');
+  
+  // ИСПРАВЛЕНИЕ: meetingId может содержать подчеркивания, userId всегда последний
+  if (parts.length < 2) {
+    await interaction.reply({ content: "❌ Ошибка: неверный формат команды.", flags: 64 });
+    return;
+  }
+  
+  // userId - последний элемент
+  const userId = parts[parts.length - 1];
+  // meetingId - все элементы кроме последнего, объединенные обратно
+  const meetingId = parts.slice(0, -1).join('_');
+  
+  console.log(`🔍 Extracted meetingId: ${meetingId}, userId: ${userId}`);
   
   const meeting = await db.getMeeting(meetingId);
   if (!meeting) {
@@ -2899,7 +2992,6 @@ async function handleRejectLateButton(interaction) {
   modal.addComponents(new ActionRowBuilder().addComponents(reasonInput));
   await interaction.showModal(modal);
 }
-
 async function handleStartRegistrationButton(interaction) {
   const meetingId = interaction.customId.split("start_registration_")[1];
   const meeting = await db.getMeeting(meetingId);
@@ -3431,17 +3523,24 @@ async function handleRegularVoteButtons(interaction) {
       return;
     }
     
-    // Быстрая проверка роли голосования
-    const voterRoleId = VOTER_ROLES_BY_CHAMBER[proposal.chamber];
-    if (!interaction.member.roles.cache.has(voterRoleId)) {
-      await interaction.editReply({ content: "❌ У вас нет роли для голосования в этой палате." });
-      return;
-    }
-    
     // Быстрая проверка активного голосования
     const voting = await db.getVoting(proposalId);
     if (!voting?.open) {
       await interaction.editReply({ content: "❌ Голосование не активно или завершено." });
+      return;
+    }
+    
+    // Проверяем возможность голосования
+    const canVote = await canUserVote(proposal, interaction.user.id, voting);
+    if (!canVote.canVote) {
+      await interaction.editReply({ content: canVote.reason });
+      return;
+    }
+    
+    // Проверяем, не голосовал ли уже пользователь
+    const hasVoted = await db.hasUserVoted(proposalId, interaction.user.id, voting.stage || 1);
+    if (hasVoted) {
+      await interaction.editReply({ content: "❌ Вы уже проголосовали по этому законопроекту и не можете изменить свой голос." });
       return;
     }
     
@@ -3454,7 +3553,12 @@ async function handleRegularVoteButtons(interaction) {
       stage: voting.stage || 1
     };
     
-    await db.addVote(vote);
+    const added = await db.addVote(vote);
+    if (!added) {
+      await interaction.editReply({ content: "❌ Вы уже проголосовали по этому законопроекту и не можете изменить свой голос." });
+      return;
+    }
+    
     await interaction.editReply({ 
       content: `✅ Ваш голос "${getVoteTypeText(voteType)}" учтен!` 
     });
@@ -3487,13 +3591,6 @@ async function handleQuantitativeVoteButtons(interaction) {
       return;
     }
     
-    // Быстрая проверка роли голосования
-    const voterRoleId = VOTER_ROLES_BY_CHAMBER[proposal.chamber];
-    if (!interaction.member.roles.cache.has(voterRoleId)) {
-      await interaction.editReply({ content: "❌ У вас нет роли для голосования в этой палате." });
-      return;
-    }
-    
     // Быстрая проверка активного голосования
     const voting = await db.getVoting(proposalId);
     if (!voting?.open) {
@@ -3501,9 +3598,23 @@ async function handleQuantitativeVoteButtons(interaction) {
       return;
     }
     
+    // Проверяем возможность голосования
+    const canVote = await canUserVote(proposal, interaction.user.id, voting);
+    if (!canVote.canVote) {
+      await interaction.editReply({ content: canVote.reason });
+      return;
+    }
+    
     // Проверяем, что это количественное голосование
     if (!proposal.isquantitative) {
       await interaction.editReply({ content: "❌ Это не количественное голосование." });
+      return;
+    }
+    
+    // Проверяем, не голосовал ли уже пользователь
+    const hasVoted = await db.hasUserVoted(proposalId, interaction.user.id, voting.stage || 1);
+    if (hasVoted) {
+      await interaction.editReply({ content: "❌ Вы уже проголосовали по этому законопроекту и не можете изменить свой голос." });
       return;
     }
     
@@ -3516,7 +3627,12 @@ async function handleQuantitativeVoteButtons(interaction) {
       stage: voting.stage || 1
     };
     
-    await db.addVote(vote);
+    const added = await db.addVote(vote);
+    if (!added) {
+      await interaction.editReply({ content: "❌ Вы уже проголосовали по этому законопроекту и не можете изменить свой голос." });
+      return;
+    }
+    
     await interaction.editReply({ 
       content: `✅ Ваш голос за пункт ${itemIndex} учтен!` 
     });
@@ -3547,13 +3663,6 @@ async function handleQuantitativeAbstainButton(interaction) {
       return;
     }
     
-    // Быстрая проверка роли голосования
-    const voterRoleId = VOTER_ROLES_BY_CHAMBER[proposal.chamber];
-    if (!interaction.member.roles.cache.has(voterRoleId)) {
-      await interaction.editReply({ content: "❌ У вас нет роли для голосования в этой палате." });
-      return;
-    }
-    
     // Быстрая проверка активного голосования
     const voting = await db.getVoting(proposalId);
     if (!voting?.open) {
@@ -3561,9 +3670,23 @@ async function handleQuantitativeAbstainButton(interaction) {
       return;
     }
     
+    // Проверяем возможность голосования
+    const canVote = await canUserVote(proposal, interaction.user.id, voting);
+    if (!canVote.canVote) {
+      await interaction.editReply({ content: canVote.reason });
+      return;
+    }
+    
     // Проверяем, что это количественное голосование
     if (!proposal.isquantitative) {
       await interaction.editReply({ content: "❌ Ошибка голосования (неверный тип)." });
+      return;
+    }
+    
+    // Проверяем, не голосовал ли уже пользователь
+    const hasVoted = await db.hasUserVoted(proposalId, interaction.user.id, voting.stage || 1);
+    if (hasVoted) {
+      await interaction.editReply({ content: "❌ Вы уже проголосовали по этому законопроекту и не можете изменить свой голос." });
       return;
     }
     
@@ -3576,7 +3699,12 @@ async function handleQuantitativeAbstainButton(interaction) {
       stage: voting.stage || 1
     };
     
-    await db.addVote(vote);
+    const added = await db.addVote(vote);
+    if (!added) {
+      await interaction.editReply({ content: "❌ Вы уже проголосовали по этому законопроекту и не можете изменить свой голос." });
+      return;
+    }
+    
     await interaction.editReply({ 
       content: `✅ Ваш голос (воздержались) учтен!` 
     });
