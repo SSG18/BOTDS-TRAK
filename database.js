@@ -1,4 +1,4 @@
-// database.js (PostgreSQL версия - ИСПРАВЛЕННАЯ)
+// database.js (PostgreSQL версия - ОПТИМИЗИРОВАННАЯ)
 import pkg from 'pg';
 const { Pool } = pkg;
 
@@ -247,17 +247,6 @@ class CongressDatabase {
     }
   }
 
-  // Метод для получения количества уникальных голосовавших
-  async getUniqueVotersCount(proposalId, stage = 1) {
-    const result = await this.query(
-      `SELECT COUNT(DISTINCT userId) as count 
-       FROM votes 
-       WHERE proposalId = $1 AND stage = $2`,
-      [proposalId, stage]
-    );
-    return parseInt(result.rows[0].count) || 0;
-  }
-
   // Оптимизированный метод для получения голосов с пагинацией
   async getVotes(proposalId, stage = 1, limit = 1000) {
     const result = await this.query(
@@ -272,6 +261,15 @@ class CongressDatabase {
     const result = await this.query(
       'SELECT 1 FROM proposals WHERE id = $1 LIMIT 1',
       [proposalId]
+    );
+    return result.rows.length > 0;
+  }
+
+  // Метод для проверки, голосовал ли уже пользователь
+  async hasUserVoted(proposalId, userId, stage = 1) {
+    const result = await this.query(
+      'SELECT 1 FROM votes WHERE proposalId = $1 AND userId = $2 AND stage = $3 LIMIT 1',
+      [proposalId, userId, stage]
     );
     return result.rows.length > 0;
   }
@@ -443,13 +441,18 @@ class CongressDatabase {
 
   // Методы для работы с голосами
   async addVote(vote) {
+    // Проверяем, не голосовал ли уже пользователь
+    const hasVoted = await this.hasUserVoted(vote.proposalId, vote.userId, vote.stage || 1);
+    if (hasVoted) {
+      return false; // Уже голосовал
+    }
+    
     await this.query(`
       INSERT INTO votes (proposalId, userId, voteType, createdAt, stage)
       VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT (proposalId, userId, stage) DO UPDATE SET
-        voteType = EXCLUDED.voteType,
-        createdAt = EXCLUDED.createdAt
     `, [vote.proposalId, vote.userId, vote.voteType, vote.createdAt, vote.stage || 1]);
+    
+    return true; // Голос успешно добавлен
   }
 
   async getVoteCounts(proposalId, stage = 1) {
